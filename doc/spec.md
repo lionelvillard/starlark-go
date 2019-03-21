@@ -1111,7 +1111,7 @@ h = [2*i for i in a]
 The environment of a Starlark program is structured as a tree of
 _lexical blocks_, each of which may contain name bindings.
 The tree of blocks is parallel to the syntax tree.
-Blocks are of four kinds.
+Blocks are of five kinds.
 
 <!-- Avoid the term "built-in" block since that's also a type. -->
 At the root of the tree is the _predeclared_ block,
@@ -1126,17 +1126,24 @@ These additional functions may have side effects on the application.
 Starlark programs cannot change the set of predeclared bindings
 or assign new values to them.
 
-Nested beneath the predeclared block is the _module_ block, which
-contains the bindings of the current file.
+Nested beneath the predeclared block is the _module_ block,
+which contains the bindings of the current module.
 Bindings in the module block (such as `a`, `b`, `c`, and `h` in the
-example) are called _global_.
+example) are called _global_ and may be visible to other modules.
 The module block is empty at the start of the file
 and is populated by top-level binding statements.
 
-A module block contains a _function_ block for each top-level
-function, and a _comprehension_ block for each top-level
-comprehension.
-Bindings inside either of these kinds of block are called _local_.
+Nested beneath the module block is the _file_ block,
+which contains bindings local to the current file.
+Only `load` statements create bindings in this block.
+The names bound by the file block and by the module block are disjoint:
+it is an error for a load statement to bind the name of a global,
+or for a top-level statement to assign to a name bound by a load statement.
+
+A file block contains a _function_ block for each top-level
+function, and a _comprehension_ block for each top-level comprehension.
+Bindings either of these kinds of block,
+and in the file block itself, are called _local_.
 Additional functions and comprehensions, and their blocks, may be
 nested in any order, to any depth.
 
