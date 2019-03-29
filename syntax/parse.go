@@ -11,7 +11,12 @@ package syntax
 // package.  Verify that error positions are correct using the
 // chunkedfile mechanism.
 
-import "log"
+import (
+	"log"
+	"strconv"
+
+	"gopkg.in/yaml.v2"
+)
 
 // Enable this flag to print the token stream and log.Fatal on the first error.
 const debug = false
@@ -126,6 +131,18 @@ func (p *parser) nextToken() Position {
 	// enable to see the token stream
 	if debug {
 		log.Printf("nextToken: %-20s%+v\n", p.tok, p.tokval.pos)
+	}
+	return oldpos
+}
+
+// nextYamlStringToken advances the YAML string scanner and returns the position of the
+// previous token.
+func (p *parser) nextYamlStringToken() Position {
+	oldpos := p.tokval.pos
+	p.tok = p.in.nextYamlStringToken(&p.tokval)
+	// enable to see the token stream
+	if debug {
+		log.Printf("nextYamlStringToken: %-20s%+v\n", p.tok, p.tokval.pos)
 	}
 	return oldpos
 }
@@ -281,6 +298,7 @@ func (p *parser) parseSimpleStmt(stmts []Stmt, consumeNL bool) []Stmt {
 // small_stmt = RETURN expr?
 //            | PASS | BREAK | CONTINUE
 //            | LOAD ...
+//            | '-' YAMLTail
 //            | expr ('=' | '+=' | '-=' | '*=' | '/=' | '%=' | '&=' | '|=' | '^=' | '<<=' | '>>=') expr   // assign
 //            | expr
 func (p *parser) parseSmallStmt() Stmt {
@@ -300,6 +318,9 @@ func (p *parser) parseSmallStmt() Stmt {
 
 	case LOAD:
 		return p.parseLoadStmt()
+	case MINUS:
+		// Parse YAML instead of a unary expression.
+		return p.parseYamlSequenceStmt()
 	}
 
 	// Assignment
@@ -310,6 +331,8 @@ func (p *parser) parseSmallStmt() Stmt {
 		pos := p.nextToken() // consume op
 		rhs := p.parseExpr(false)
 		return &AssignStmt{OpPos: pos, Op: op, LHS: x, RHS: rhs}
+	case COLON:
+		return p.parseYamlMappingStmt(x)
 	}
 
 	// Expression statement (e.g. function call, doc string).
@@ -380,6 +403,138 @@ func (p *parser) parseLoadStmt() *LoadStmt {
 		From:   from,
 		Rparen: rparen,
 	}
+}
+
+// parseYamlStmt parses the YAML at the start position and embedded expressions
+func (p *parser) parseYamlMappingStmt(expr Expr) *ReturnStmt {
+	// do not consume ':'
+
+	// Parse YAML including consumed token
+	start, _ := expr.Span()
+
+	var consumed = ""
+	switch expr.(type) {
+	case *Ident:
+		consumed = expr.(*Ident).Name
+	case *Literal:
+		consumed = expr.(*Literal).Value.(string)
+	default:
+		p.in.errorf(start, "got ':', want newline or YAML")
+	}
+	p.in.scanYaml(&p.tokval, consumed+":", start)
+
+	var t interface{}
+	err := yaml.Unmarshal([]byte(p.tokval.string), &t)
+	if err != nil {
+		p.in.errorf(start, "not YAML (%v)", err)
+	}
+
+	p.nextToken() // consume YAML token
+
+	// Convert YAML to dictionary
+	dict := p.normalizeYAML(start, t)
+	return &ReturnStmt{Return: start, Result: dict}
+}
+
+// parseYamlSequenceStmt parses the YAML sequence
+func (p *parser) parseYamlSequenceStmt() *ReturnStmt {
+	// do not consume '-'
+	start := p.tokval.pos
+	p.in.scanYaml(&p.tokval, "-", start)
+
+	// Parse YAML
+	var t interface{}
+	err := yaml.Unmarshal([]byte(p.tokval.string), &t)
+	if err != nil {
+		// TODO: better line/col position
+		p.in.errorf(start, "not YAML (%v)", err)
+	}
+
+	p.nextToken() // consume YAML token.
+
+	// Convert YAML to list
+	dict := p.normalizeYAML(start, t)
+	return &ReturnStmt{Return: start, Result: dict}
+}
+
+func (p *parser) normalizeYAML(pos Position, value interface{}) Expr {
+	switch value.(type) {
+	case string:
+		return p.normalizeYamlString(pos, value.(string))
+	case int:
+		return &Literal{Raw: strconv.Itoa(value.(int)), Value: value, Token: INT}
+	case map[interface{}]interface{}:
+		entries := []Expr{}
+		for key, value := range value.(map[interface{}]interface{}) {
+			keyExpr := p.normalizeYAML(pos, key)
+			valueExpr := p.normalizeYAML(pos, value)
+
+			entries = append(entries, &DictEntry{Key: keyExpr, Value: valueExpr})
+		}
+		return &DictExpr{Lbrace: pos, List: entries, Rbrace: pos}
+	case []interface{}:
+		entries := []Expr{}
+		for _, value := range value.([]interface{}) {
+			valueExpr := p.normalizeYAML(pos, value)
+			entries = append(entries, valueExpr)
+		}
+		return &ListExpr{Lbrack: pos, List: entries, Rbrack: pos}
+	case nil:
+		return &Ident{Name: "None"}
+	default:
+		p.in.errorf(pos, "not YAML (%v)", value)
+	}
+	return nil
+}
+
+func (p *parser) normalizeYamlString(pos Position, value string) Expr {
+	// Process enclosed starlark expression `{ ... }` or `s{ ... }`
+	// Save starlark parser
+	saveParser := *p
+
+	p.in = newYamlStringScanner([]byte(value), pos)
+	p.tokval = tokenValue{pos: pos}
+
+	exprs := make([]Expr, 0)
+	for {
+		pos = p.nextYamlStringToken()
+		if p.tok == EOF {
+			break
+		}
+
+		if p.tok == STRING {
+			exprs = append(exprs, &Literal{Raw: p.tokval.raw, Value: p.tokval.string, Token: STRING})
+		} else if p.tok == ENCLOSED_EXPR {
+			expr, err := ParseExpr("", p.tokval.raw, 0)
+			if err != nil {
+				p.in.errorf(pos, "invalid enclosed expression %v", err)
+			}
+			exprs = append(exprs, expr)
+		} else {
+			p.in.errorf(pos, "invalid token %s", p.tok.String())
+		}
+	}
+
+	// Restore starlark parser
+	*p = saveParser
+
+	if len(exprs) == 0 {
+		// empty string
+		panic("empty string")
+	}
+	if len(exprs) == 1 {
+		return exprs[0]
+	}
+
+	top := &BinaryExpr{Op: PLUS, X: exprs[0]}
+	tail := top
+	for i := 1; i < len(exprs)-1; i++ {
+		right := &BinaryExpr{Op: PLUS, X: exprs[i]}
+		tail.Y = right
+		tail = right
+	}
+	tail.Y = exprs[len(exprs)-1]
+	return top
 }
 
 // suite is typically what follows a COLON (e.g. after DEF or FOR).

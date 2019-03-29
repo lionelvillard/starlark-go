@@ -677,8 +677,21 @@ func (d *Dict) Freeze()                                         { d.ht.freeze() 
 func (d *Dict) Truth() Bool                                     { return d.Len() > 0 }
 func (d *Dict) Hash() (uint32, error)                           { return 0, fmt.Errorf("unhashable type: dict") }
 
-func (d *Dict) Attr(name string) (Value, error) { return builtinAttr(d, name, dictMethods) }
-func (d *Dict) AttrNames() []string             { return builtinAttrNames(dictMethods) }
+func (d *Dict) Attr(name string) (Value, error) {
+	value, err := builtinAttr(d, name, dictMethods)
+	if err != nil || value != nil {
+		return value, err
+	}
+
+	// Try dictionary entry
+	value, found, err := d.Get(String(name))
+	if !found {
+		return nil, nil
+	}
+	return value, err
+}
+
+func (d *Dict) AttrNames() []string { return builtinAttrNames(dictMethods) }
 
 func (x *Dict) CompareSameType(op syntax.Token, y_ Value, depth int) (bool, error) {
 	y := y_.(*Dict)

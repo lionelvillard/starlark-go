@@ -35,6 +35,7 @@ const (
 	INT    // 123
 	FLOAT  // 1.23e45
 	STRING // "foo" or 'foo' or '''foo''' or r'foo' or r"foo"
+	YAML   // fda: or - fda ...
 
 	// Punctuation
 	PLUS          // +
@@ -97,6 +98,9 @@ const (
 	PASS
 	RETURN
 	WHILE
+
+	// YAML extensions
+	ENCLOSED_EXPR
 
 	maxToken
 )
@@ -180,6 +184,7 @@ var tokenNames = [...]string{
 	PASS:          "pass",
 	RETURN:        "return",
 	WHILE:         "while",
+	ENCLOSED_EXPR: "enclosedexpr",
 }
 
 // A Position describes the location of a rune of input.
@@ -237,6 +242,7 @@ type scanner struct {
 	pos            Position  // current input position
 	depth          int       // nesting of [ ] { } ( )
 	indentstk      []int     // stack of indentation levels
+	newlines       bool      // saved NEWLINE
 	dents          int       // number of saved INDENT (>0) or OUTDENT (<0) tokens to return
 	lineStart      bool      // after NEWLINE; convert spaces to indentation tokens
 	keepComments   bool      // accumulate comments in slice
@@ -453,6 +459,13 @@ func (sc *scanner) nextToken(val *tokenValue) Token {
 	// Although NEWLINE tokens are infrequent, and lineStart is
 	// usually (~97%) false on entry, skipped newlines account for
 	// about 50% of all iterations of the 'start' loop.
+
+	//
+	if sc.newlines {
+		sc.newlines = false
+		sc.lineStart = true
+		return NEWLINE
+	}
 
 start:
 	var c rune
@@ -1033,6 +1046,201 @@ func (sc *scanner) scanNumber(val *tokenValue, c rune) Token {
 		}
 		return INT
 	}
+}
+
+func (sc *scanner) scanYaml(val *tokenValue, prefix string, startPos Position) Token {
+	sc.startToken(val)
+
+	indent := sc.indentstk[len(sc.indentstk)-1]
+	raw := new(strings.Builder)
+	raw.WriteString(prefix)
+
+	// consume all characters on the first line
+	for {
+		c := sc.peekRune()
+		if c == '\n' {
+			break
+		}
+		if c == 0 {
+			sc.endToken(val)
+			val.raw = raw.String()
+			val.string = val.raw
+
+			return YAML
+
+		}
+		sc.readRune()
+		raw.WriteRune(c)
+	}
+
+	// Consume all characters with the same indent or greater
+	for {
+		c := sc.readRune()
+		if c == '\n' || c == 0 {
+			blank := false
+			col := 0
+
+			i := 0
+			b := byte(0)
+			for {
+				if len(sc.rest) <= i {
+					break
+				}
+
+				b = sc.rest[i]
+				if b == ' ' {
+					col++
+				} else if b == '\t' {
+					const tab = 8
+					col += int(tab - (sc.pos.Col-1)%tab)
+				} else {
+					break
+				}
+				i++
+			}
+
+			// The third clause matches EOF.
+			if b == '#' || b == '\n' || b == 0 {
+				blank = true
+			}
+
+			if c == 0 || (!blank && col < indent) {
+				// done parsing
+				sc.endToken(val)
+				sc.newlines = true
+
+				val.raw = raw.String()
+				val.string = val.raw
+				return YAML
+			}
+
+			// Consume spaces
+			sc.rest = sc.rest[i:]
+
+			raw.WriteByte('\n')
+
+			// account for additinal indent
+			yamlIndent := col - indent
+			for yamlIndent > 0 {
+				raw.WriteByte(' ')
+				yamlIndent--
+			}
+		} else {
+			raw.WriteRune(c)
+		}
+	}
+}
+
+func newYamlStringScanner(data []byte, position Position) *scanner {
+	sc := &scanner{
+		pos:  position,
+		rest: data,
+	}
+	return sc
+}
+
+func (sc *scanner) nextYamlStringToken(val *tokenValue) Token {
+	var c rune
+	c = sc.peekRune()
+
+	// Comment (skip)
+	if c == '#' {
+		// Consume up to newline (included).
+		for c != 0 && c != '\n' {
+			sc.readRune()
+			c = sc.peekRune()
+		}
+	}
+
+	if c == 0 {
+		sc.startToken(val)
+		sc.endToken(val)
+		return EOF
+	}
+
+	// Enclosed expression
+	if c == '{' {
+		sc.readRune()
+		return sc.scanEnclosedExpr(val)
+	}
+
+	// Enclosed expression (first position)
+	if c == 's' && len(sc.rest) > 1 && sc.rest[1] == '{' {
+		sc.readRune() // s
+		sc.readRune() // {
+		return sc.scanEnclosedExpr(val)
+	}
+
+	// quoted string fragment
+	if c == '"' || c == '\'' {
+		// triple quoting is not valid YAML, so ok to reuse scanString here.
+		// no enclosed expression can occur in quoted string.
+		sc.startToken(val)
+		return sc.scanString(val, c)
+	}
+
+	// unquoted string fragment
+	sc.startToken(val)
+	return sc.scanUnquotedString(val)
+}
+
+func (sc *scanner) scanEnclosedExpr(val *tokenValue) Token {
+	// Skip leading whitespaces
+	for {
+		if sc.eof() {
+			sc.error(val.pos, "unexpected EOF in enclosed expression")
+		}
+		c := sc.peekRune()
+
+		if c != ' ' && c != '\t' {
+			break
+		}
+
+		sc.readRune()
+	}
+	sc.startToken(val)
+
+	for {
+		if sc.eof() {
+			sc.error(val.pos, "unexpected EOF in enclosed expression")
+		}
+		c := sc.peekRune()
+
+		if c == '}' {
+			break
+		}
+		sc.readRune()
+		if c == '\\' {
+			if sc.eof() {
+				sc.error(val.pos, "unexpected EOF in in enclosed expression")
+			}
+			sc.readRune()
+		}
+	}
+
+	sc.endToken(val)
+	sc.readRune() // }
+	return ENCLOSED_EXPR
+}
+
+func (sc *scanner) scanUnquotedString(val *tokenValue) Token {
+	sc.readRune()
+
+	for {
+		if sc.eof() {
+			break
+		}
+		c := sc.peekRune()
+
+		if c == '{' {
+			// Beginning of enclosed expression
+			break
+		}
+		sc.readRune()
+	}
+	sc.endToken(val)
+	val.string = val.raw
+	return STRING
 }
 
 // isIdent reports whether c is an identifier rune.

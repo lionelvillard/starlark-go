@@ -28,6 +28,7 @@ SmallStmt = ReturnStmt
           | AssignStmt
           | ExprStmt
           | LoadStmt
+          | YamlStmt
           .
 
 ReturnStmt   = 'return' [Expression] .
@@ -36,6 +37,7 @@ ContinueStmt = 'continue' .
 PassStmt     = 'pass' .
 AssignStmt   = Expression ('=' | '+=' | '-=' | '*=' | '/=' | '//=' | '%=' | '&=' | '|=' | '^=' | '<<=' | '>>=') Expression .
 ExprStmt     = Expression .
+YamlStmt     = identifier ':' YAMLTail
 
 LoadStmt = 'load' '(' string {',' [identifier '='] string} [','] ')' .
 
