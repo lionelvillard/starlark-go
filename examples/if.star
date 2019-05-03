@@ -6,4 +6,4 @@ def cond(v1):
     apiVersion: extensions/v1beta1
     kind: Deployment
 
-print(cond(True))
+cond(True)
