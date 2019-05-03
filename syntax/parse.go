@@ -40,7 +40,7 @@ func Parse(filename string, src interface{}, mode Mode) (f *File, err error) {
 	if err != nil {
 		return nil, err
 	}
-	p := parser{in: in}
+	p := parser{in: in, indef: 0}
 	defer p.in.recover(&err)
 
 	p.nextToken() // read first lookahead token
@@ -121,6 +121,7 @@ type parser struct {
 	in     *scanner
 	tok    Token
 	tokval tokenValue
+	indef  int
 }
 
 // nextToken advances the scanner and returns the position of the
@@ -180,7 +181,9 @@ func (p *parser) parseDefStmt() Stmt {
 	params := p.parseParams()
 	p.consume(RPAREN)
 	p.consume(COLON)
+	p.indef++
 	body := p.parseSuite()
+	p.indef--
 	return &DefStmt{
 		Def:  defpos,
 		Name: id,
@@ -406,7 +409,7 @@ func (p *parser) parseLoadStmt() *LoadStmt {
 }
 
 // parseYamlStmt parses the YAML at the start position and embedded expressions
-func (p *parser) parseYamlMappingStmt(expr Expr) *ReturnStmt {
+func (p *parser) parseYamlMappingStmt(expr Expr) Stmt {
 	// do not consume ':'
 
 	// Parse YAML including consumed token
@@ -433,11 +436,14 @@ func (p *parser) parseYamlMappingStmt(expr Expr) *ReturnStmt {
 
 	// Convert YAML to dictionary
 	dict := p.normalizeYAML(start, t)
-	return &ReturnStmt{Return: start, Result: dict}
+	if p.indef != 0 {
+		return &ReturnStmt{Return: start, Result: dict}
+	}
+	return &ExprStmt{X: dict}
 }
 
 // parseYamlSequenceStmt parses the YAML sequence
-func (p *parser) parseYamlSequenceStmt() *ReturnStmt {
+func (p *parser) parseYamlSequenceStmt() Stmt {
 	// do not consume '-'
 	start := p.tokval.pos
 	p.in.scanYaml(&p.tokval, "-", start)
@@ -454,7 +460,10 @@ func (p *parser) parseYamlSequenceStmt() *ReturnStmt {
 
 	// Convert YAML to list
 	dict := p.normalizeYAML(start, t)
-	return &ReturnStmt{Return: start, Result: dict}
+	if p.indef != 0 {
+		return &ReturnStmt{Return: start, Result: dict}
+	}
+	return &ExprStmt{X: dict}
 }
 
 func (p *parser) normalizeYAML(pos Position, value interface{}) Expr {

@@ -1075,8 +1075,17 @@ func (sc *scanner) scanYaml(val *tokenValue, prefix string, startPos Position) T
 
 	// Consume all characters with the same indent or greater
 	for {
-		c := sc.readRune()
-		if c == '\n' || c == 0 {
+		c := sc.peekRune()
+
+		if c == 0 {
+			// eof
+			sc.endToken(val)
+			val.raw = raw.String()
+			val.string = val.raw
+			return YAML
+		}
+		sc.readRune()
+		if c == '\n' {
 			blank := false
 			col := 0
 
